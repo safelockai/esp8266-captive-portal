@@ -1,0 +1,136 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <DNSServer.h>
+#include <EEPROM.h>
+
+// Configuração do AP Wi-Fi
+String ssid = "Free-WiFi";           // Nome da rede Wi-Fi (configurável)
+IPAddress apIP(192, 168, 4, 1);      // IP do ESP no modo AP
+IPAddress netMsk(255, 255, 255, 0);  // Máscara de sub-rede
+
+// Configuração de DNS
+const byte DNS_PORT = 53;
+DNSServer dnsServer;
+
+// Servidor Web
+ESP8266WebServer server(80);
+
+// Dados de autenticação para a área administrativa
+const char* adminUser = "kali2";
+const char* adminPassword = "kali";
+
+// URL de redirecionamento (configurável)
+String redirectURL = "http://example.com";
+
+// Tamanho máximo para armazenar na EEPROM
+const int EEPROM_SIZE = 256;  // Ajustado para comportar URL e SSID
+const int SSID_OFFSET = 128; // Offset para salvar o SSID
+
+// Função para salvar dados na EEPROM
+void salvarNaEEPROM(int offset, const String& data) {
+  EEPROM.begin(EEPROM_SIZE);
+  for (int i = 0; i < (EEPROM_SIZE - offset); i++) {
+    if (i < data.length()) {
+      EEPROM.write(offset + i, data[i]);
+    } else {
+      EEPROM.write(offset + i, 0); // Preenche o restante com null terminator
+    }
+  }
+  EEPROM.commit();
+  EEPROM.end();
+}
+
+// Função para carregar dados da EEPROM
+String carregarDaEEPROM(int offset) {
+  EEPROM.begin(EEPROM_SIZE);
+  String data = "";
+  for (int i = 0; i < (EEPROM_SIZE - offset); i++) {
+    char c = EEPROM.read(offset + i);
+    if (c == 0) break; // Parar se encontrar um null terminator
+    data += c;
+  }
+  EEPROM.end();
+  return data;
+}
+
+// Função de autenticação
+bool authenticate() {
+  if (!server.authenticate(adminUser, adminPassword)) {
+    server.requestAuthentication();
+    return false;
+  }
+  return true;
+}
+
+// Página principal do captive portal
+void handleRoot() {
+  String html = "<html><head>";
+  html += "<meta http-equiv='refresh' content='0; url=" + redirectURL + "' />";
+  html += "</head><body><p>Redirecionando para <a href='" + redirectURL + "'>" + redirectURL + "</a></p></body></html>";
+  server.send(200, "text/html", html);
+}
+
+// Página administrativa para configurar o SSID e URL
+void handleAdmin() {
+  if (!authenticate()) return;
+
+  String html = "<html><body><h1>Configuração do Redirecionamento e SSID</h1>";
+  html += "<form action='/salvar' method='POST'>";
+  html += "SSID: <input type='text' name='ssid' value='" + ssid + "'><br><br>";
+  html += "URL para Redirecionamento: <input type='text' name='redirectURL' value='" + redirectURL + "'><br><br>";
+  html += "<input type='submit' value='Salvar'>";
+  html += "</form></body></html>";
+  server.send(200, "text/html", html);
+}
+
+// Salvar as configurações (SSID e URL)
+void handleSalvar() {
+  if (!authenticate()) return;
+
+  if (server.hasArg("redirectURL")) {
+    redirectURL = server.arg("redirectURL");
+    salvarNaEEPROM(0, redirectURL); // Salva a URL na EEPROM
+  }
+  if (server.hasArg("ssid")) {
+    ssid = server.arg("ssid");
+    salvarNaEEPROM(SSID_OFFSET, ssid); // Salva o SSID na EEPROM
+    WiFi.softAP(ssid.c_str()); // Atualiza o SSID em tempo real
+  }
+
+  String html = "<html><body><h1>Configurações Salvas!</h1>";
+  html += "<p><a href='/admin'>Voltar para Administração</a></p></body></html>";
+  server.send(200, "text/html", html);
+}
+
+// Configurar o ponto de acesso e servidor web
+void setup() {
+  Serial.begin(115200);
+
+  // Carregar configurações da EEPROM
+  redirectURL = carregarDaEEPROM(0);
+  ssid = carregarDaEEPROM(SSID_OFFSET);
+  if (redirectURL == "") redirectURL = "http://example.com"; // Valor padrão
+  if (ssid == "") ssid = "Free-WiFi";                       // Valor padrão
+
+  // Configura o ponto de acesso
+  WiFi.softAP(ssid.c_str());
+  WiFi.softAPConfig(apIP, apIP, netMsk);
+  dnsServer.start(DNS_PORT, "*", apIP);
+
+  // Configura rotas do servidor web
+  server.on("/", handleRoot);
+  server.on("/admin", HTTP_GET, handleAdmin);
+  server.on("/salvar", HTTP_POST, handleSalvar);
+  server.onNotFound(handleRoot); // Captura todas as requisições
+
+  // Inicia o servidor
+  server.begin();
+  Serial.println("Servidor iniciado!");
+  Serial.print("IP do Captive Portal: ");
+  Serial.println(apIP);
+}
+
+void loop() {
+  dnsServer.processNextRequest();
+  server.handleClient();
+}
